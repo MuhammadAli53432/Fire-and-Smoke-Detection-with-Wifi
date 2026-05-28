@@ -1,0 +1,169 @@
+/*
+ * ESP32 Gas & Fire Alert System with Blynk IoT and Dynamic WiFi Configuration
+ * 
+ * Features:
+ * 1. Dynamic WiFi Configuration: Uses WiFiManager to allow connecting to any WiFi network
+ *    without hardcoding the credentials in the source code.
+ * 2. Rate-limited Alerts: Prevents flooding the Blynk server (prevents account suspension due to too many notifications).
+ * 3. Fallback Access Point: If WiFi is not configured or lost, the ESP32 hosts a captive portal
+ *    named "ESP32-Smart-Alert-AP" where you can input the new WiFi credentials.
+ */
+
+// ==========================================
+// 1. Blynk Template Configuration (MUST BE FIRST)
+// ==========================================
+#define BLYNK_TEMPLATE_ID "TMPL6aAQQet1g"
+#define BLYNK_TEMPLATE_NAME "GAS or FLAME ALERT"
+#define BLYNK_AUTH_TOKEN "T1CDtagRYFoeGpnebBJ-esg6Mhc2wOkn"
+
+// Debug prints to Serial Monitor
+#define BLYNK_PRINT Serial
+
+// ==========================================
+// 2. Library Declarations
+// ==========================================
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <WiFiManager.h>          // Install "WiFiManager" by tzapu in Arduino Library Manager
+#include <BlynkSimpleEsp32.h>
+
+// ==========================================
+// 3. Pin Definitions
+// ==========================================
+#define MQ2_DOUT_PIN 32    // Digital Output pin for MQ2 Gas Sensor
+#define FLAME_PIN 35       // Digital Input pin for Flame Sensor
+
+// ==========================================
+// 4. Global Variables & Objects
+// ==========================================
+BlynkTimer timer;
+
+// State flags to prevent notification spamming
+bool isGasAlertActive = false;
+bool isFireAlertActive = false;
+
+// Cooldown timer (in milliseconds) to prevent rapid consecutive notifications
+// E.g., once an alert is sent, don't send another one for at least 30 seconds
+unsigned long lastGasAlertTime = 0;
+unsigned long lastFireAlertTime = 0;
+const unsigned long ALERT_COOLDOWN_MS = 30000; 
+
+// ==========================================
+// 5. Sensor Checking Logic
+// ==========================================
+void checkSensors() {
+  int gasValue = digitalRead(MQ2_DOUT_PIN);  // HIGH when Gas is detected (Active High)
+  int flameValue = digitalRead(FLAME_PIN);   // LOW when Flame is detected (Active Low)
+  unsigned long currentTime = millis();
+
+  // Print current readings to Serial Monitor
+  Serial.print("[Sensor Scan] ");
+  Serial.print("Gas DOUT: ");
+  Serial.print(gasValue == HIGH ? "⚠️ DETECTED" : "OK");
+  Serial.print(" | Flame: ");
+  Serial.println(flameValue == LOW ? "🔥 DETECTED" : "OK");
+
+  // --- GAS ALERT SYSTEM ---
+  if (gasValue == HIGH) {
+    // Check if state transitioned or if cooldown has passed
+    if (!isGasAlertActive || (currentTime - lastGasAlertTime > ALERT_COOLDOWN_MS)) {
+      Serial.println(">>> Sending Gas Alert to Blynk...");
+      Blynk.logEvent("gas_alert", "⚠️ Danger: Gas Leakage Detected!");
+      isGasAlertActive = true;
+      lastGasAlertTime = currentTime;
+    }
+  } else {
+    if (isGasAlertActive) {
+      Serial.println(">>> Gas level returned to normal.");
+      isGasAlertActive = false;
+    }
+  }
+
+  // --- FIRE ALERT SYSTEM ---
+  if (flameValue == LOW) { // LOW means flame detected on standard flame modules
+    // Check if state transitioned or if cooldown has passed
+    if (!isFireAlertActive || (currentTime - lastFireAlertTime > ALERT_COOLDOWN_MS)) {
+      Serial.println(">>> Sending Fire Alert to Blynk...");
+      Blynk.logEvent("fire_alert", "🔥 Critical: Fire/Flame Detected!");
+      isFireAlertActive = true;
+      lastFireAlertTime = currentTime;
+    }
+  } else {
+    if (isFireAlertActive) {
+      Serial.println(">>> Fire alert cleared.");
+      isFireAlertActive = false;
+    }
+  }
+}
+
+// ==========================================
+// 6. Setup Function
+// ==========================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n==========================================");
+  Serial.println("ESP32 Gas & Fire Security System Starting...");
+  Serial.println("==========================================\n");
+
+  // Configure Pins
+  pinMode(MQ2_DOUT_PIN, INPUT);
+  pinMode(FLAME_PIN, INPUT);
+
+  // Initialize WiFiManager
+  WiFiManager wm;
+
+  // Uncomment the line below if you want to reset saved WiFi credentials for testing
+  // wm.resetSettings();
+
+  Serial.println("Connecting to WiFi...");
+  
+  // Customizing the AP portal configuration page
+  wm.setAPCallback([](WiFiManager *myWiFiManager) {
+    Serial.println("Entered Config Mode!");
+    Serial.print("Access Point SSID: ");
+    Serial.println(myWiFiManager->getConfigPortalSSID());
+    Serial.print("AP IP Address:      ");
+    Serial.println(WiFi.softAPIP());
+  });
+
+  // Tries to connect to previously saved WiFi credentials.
+  // If it fails or has no saved credentials, it creates a temporary AP named "ESP32-Smart-Alert-AP"
+  // with password "12345678" and blocks here until configured.
+  if (!wm.autoConnect("ESP32-Smart-Alert-AP", "12345678")) {
+    Serial.println("Failed to connect to WiFi and hit timeout. Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.println("\nWiFi connected successfully!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  // Initialize Blynk using the active WiFi connection
+  Serial.println("Connecting to Blynk Cloud...");
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  
+  // Wait up to 10 seconds to establish connection with Blynk
+  if (Blynk.connect(10000)) {
+    Serial.println("Blynk Connected!");
+  } else {
+    Serial.println("Blynk Connection Failed! Will retry in background loop.");
+  }
+
+  // Set sensor checking interval to run every 2000ms (2 seconds)
+  timer.setInterval(2000L, checkSensors);
+}
+
+// ==========================================
+// 7. Main Loop
+// ==========================================
+void loop() {
+  // Run Blynk engine
+  Blynk.run();
+  
+  // Run scheduler timer
+  timer.run();
+}
